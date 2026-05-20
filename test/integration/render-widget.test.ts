@@ -1,12 +1,10 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 
-const { buildWidgetLines, renderWidget, stopResultAnimations, stopWidgetAnimation, syncResultAnimation } = await import("../../src/tui/render.ts") as {
+const { buildWidgetLines, clearLegacyResultAnimationTimer, renderWidget } = await import("../../src/tui/render.ts") as {
 	buildWidgetLines: (jobs: Array<Record<string, unknown>>, theme: { fg(name: string, text: string): string; bold(text: string): string }, width?: number, expanded?: boolean) => string[];
+	clearLegacyResultAnimationTimer: (context: { state: { subagentResultAnimationTimer?: ReturnType<typeof setInterval> } }) => void;
 	renderWidget: (ctx: Record<string, unknown>, jobs: Array<Record<string, unknown>>) => void;
-	stopResultAnimations: () => void;
-	stopWidgetAnimation: () => void;
-	syncResultAnimation: (result: Record<string, unknown>, context: { state: { subagentResultAnimationTimer?: ReturnType<typeof setInterval> }; invalidate: () => void }) => void;
 };
 
 const theme = {
@@ -14,24 +12,14 @@ const theme = {
 	bold: (text: string) => text,
 };
 
-const STALE_EXTENSION_CONTEXT_MESSAGE = "This extension ctx is stale after session replacement or reload";
+const runningGlyphPattern = "[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●]";
 
-function staleExtensionContextError(): Error {
-	return new Error(STALE_EXTENSION_CONTEXT_MESSAGE);
+function firstGrapheme(text: string): string {
+	return Array.from(text.trimStart())[0] ?? "";
 }
 
-async function expectNoUncaught(action: () => Promise<void> | void): Promise<void> {
-	let uncaught: unknown;
-	const handler = (error: unknown) => {
-		uncaught = error;
-	};
-	process.once("uncaughtException", handler);
-	try {
-		await action();
-	} finally {
-		process.removeListener("uncaughtException", handler);
-	}
-	assert.equal(uncaught, undefined, `expected no uncaught exception, got: ${uncaught instanceof Error ? uncaught.message : String(uncaught)}`);
+function firstRunningGlyph(text: string): string {
+	return text.match(/[⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏●]/)?.[0] ?? "";
 }
 
 function createUiContext() {
@@ -67,7 +55,7 @@ describe("subagent async widget rendering", () => {
 		], theme, 120);
 
 		const text = lines.join("\n");
-		assert.match(text, /^● Async agents · background/);
+		assert.match(text, new RegExp(`^${runningGlyphPattern} Async agents · background`));
 		assert.ok(text.indexOf("scout") < text.indexOf("queued"), "running row should precede queued summary");
 		assert.ok(text.indexOf("queued") < text.indexOf("reviewer"), "queued summary should precede completions");
 		assert.match(text, /⎿  read/);
@@ -99,37 +87,34 @@ describe("subagent async widget rendering", () => {
 	it("renders a compact component widget for three active parallel agents without core truncation", () => {
 		const now = Date.now();
 		const ui = createUiContext();
-		try {
-			renderWidget(ui.ctx as never, [{
-				asyncId: "run-1",
-				asyncDir: "/tmp/1",
-				status: "running",
-				mode: "parallel",
-				agents: ["reviewer", "reviewer", "reviewer"],
-				activeParallelGroup: true,
-				runningSteps: 3,
-				completedSteps: 0,
-				stepsTotal: 3,
-				steps: [
-					{ index: 0, agent: "reviewer", status: "running", lastActivityAt: now, turnCount: 5, toolCount: 18, tokens: { input: 30_000, output: 10_000, cache: 4_000, total: 44_000 } },
-					{ index: 1, agent: "reviewer", status: "running", lastActivityAt: now - 2000, turnCount: 4, toolCount: 13, tokens: { input: 16_000, output: 4_000, cache: 2_000, total: 22_000 } },
-					{ index: 2, agent: "reviewer", status: "running", currentTool: "grep", currentToolStartedAt: now - 1000, turnCount: 3, toolCount: 11, tokens: { input: 14_000, output: 3_000, cache: 2_000, total: 19_000 } },
-				],
-			}]);
-			const widget = ui.widgets.at(-1);
-			assert.equal(typeof widget, "function", "renderWidget should install a component widget, not a capped string-array widget");
-			const lines = (widget as (_tui: unknown, widgetTheme: typeof theme) => { render(width: number): string[] })(undefined, theme).render(180).map((line) => line.trimEnd());
-			const text = lines.join("\n");
-			assert.match(text, /async subagent parallel \(3\) · background/);
-			assert.match(text, /Agent 1\/3: reviewer · running · active now · 5 turns · 18 tool uses · 44k token/);
-			assert.match(text, /Agent 2\/3: reviewer · running · active 2s ago · 4 turns · 13 tool uses · 22k token/);
-			assert.match(text, /Agent 3\/3: reviewer · running · grep \| 1\.0s · 3 turns · 11 tool uses · 19k token/);
-			assert.match(text, /Press Ctrl\+O for live detail/);
-			assert.doesNotMatch(text, /widget truncated/);
-			assert.ok(lines.length <= 10, "collapsed component should stay under Pi's string-widget cap even though it bypasses it");
-		} finally {
-			stopWidgetAnimation();
-		}
+		renderWidget(ui.ctx as never, [{
+			asyncId: "run-1",
+			asyncDir: "/tmp/1",
+			status: "running",
+			mode: "parallel",
+			agents: ["reviewer", "reviewer", "reviewer"],
+			activeParallelGroup: true,
+			runningSteps: 3,
+			completedSteps: 0,
+			stepsTotal: 3,
+			updatedAt: now,
+			steps: [
+				{ index: 0, agent: "reviewer", status: "running", lastActivityAt: now, turnCount: 5, toolCount: 18, tokens: { input: 30_000, output: 10_000, cache: 4_000, total: 44_000 } },
+				{ index: 1, agent: "reviewer", status: "running", lastActivityAt: now - 2000, turnCount: 4, toolCount: 13, tokens: { input: 16_000, output: 4_000, cache: 2_000, total: 22_000 } },
+				{ index: 2, agent: "reviewer", status: "running", currentTool: "grep", currentToolStartedAt: now - 1000, turnCount: 3, toolCount: 11, tokens: { input: 14_000, output: 3_000, cache: 2_000, total: 19_000 } },
+			],
+		}]);
+		const widget = ui.widgets.at(-1);
+		assert.equal(typeof widget, "function", "renderWidget should install a component widget, not a capped string-array widget");
+		const lines = (widget as (_tui: unknown, widgetTheme: typeof theme) => { render(width: number): string[] })(undefined, theme).render(180).map((line) => line.trimEnd());
+		const text = lines.join("\n");
+		assert.match(text, /async subagent parallel \(3\) · background/);
+		assert.match(text, /Agent 1\/3: reviewer · running · active now · 5 turns · 18 tool uses · 44k token/);
+		assert.match(text, /Agent 2\/3: reviewer · running · active 2s ago · 4 turns · 13 tool uses · 22k token/);
+		assert.match(text, /Agent 3\/3: reviewer · running · grep \| 1\.0s · 3 turns · 11 tool uses · 19k token/);
+		assert.match(text, /Press Ctrl\+O for live detail/);
+		assert.doesNotMatch(text, /widget truncated/);
+		assert.ok(lines.length <= 10, "collapsed component should stay under Pi's string-widget cap even though it bypasses it");
 	});
 
 	it("shows per-agent detail for active async parallel widget rows", () => {
@@ -145,6 +130,7 @@ describe("subagent async widget rendering", () => {
 				runningSteps: 2,
 				completedSteps: 1,
 				stepsTotal: 3,
+				updatedAt: now,
 				steps: [
 					{ agent: "reviewer", status: "running", lastActivityAt: now, toolCount: 2 },
 					{ agent: "reviewer", status: "running", currentTool: "read", currentToolStartedAt: now - 2000 },
@@ -224,6 +210,7 @@ describe("subagent async widget rendering", () => {
 			runningSteps: 1,
 			completedSteps: 0,
 			stepsTotal: 1,
+			updatedAt: now,
 			steps: [
 				{
 					index: 0,
@@ -260,6 +247,7 @@ describe("subagent async widget rendering", () => {
 			mode: "single",
 			agents: ["worker"],
 			stepsTotal: 1,
+			updatedAt: now,
 			steps: [
 				{
 					index: 0,
@@ -297,6 +285,7 @@ describe("subagent async widget rendering", () => {
 				agents: ["worker"],
 				currentTool: "read",
 				currentToolStartedAt: now - 1000,
+				updatedAt: now,
 			},
 		], theme, 180).join("\n");
 
@@ -419,148 +408,100 @@ describe("subagent async widget rendering", () => {
 		assert.match(lines.join("\n"), /\+1 more \(1 queued\)/);
 	});
 
+	it("advances running widget glyphs when progress seed changes", () => {
+		const first = buildWidgetLines([
+			{ asyncId: "run-progress", asyncDir: "/tmp/run", status: "running", agents: ["worker"], updatedAt: 11 },
+			{ asyncId: "run-other", asyncDir: "/tmp/other", status: "running", agents: ["scout"], updatedAt: 0 },
+		], theme, 120);
+		const second = buildWidgetLines([
+			{ asyncId: "run-progress", asyncDir: "/tmp/run", status: "running", agents: ["worker"], updatedAt: 12 },
+			{ asyncId: "run-other", asyncDir: "/tmp/other", status: "running", agents: ["scout"], updatedAt: 0 },
+		], theme, 120);
+
+		assert.notEqual(firstGrapheme(first[0] ?? ""), firstGrapheme(second[0] ?? ""), "header glyph should advance from changed progress");
+		assert.notEqual(firstRunningGlyph(first[1] ?? ""), firstRunningGlyph(second[1] ?? ""), "job glyph should advance from changed progress");
+
+		const firstStep = buildWidgetLines([{
+			asyncId: "run-step-progress",
+			asyncDir: "/tmp/run-step",
+			status: "running",
+			agents: ["worker"],
+			stepsTotal: 1,
+			updatedAt: 20,
+			steps: [{ agent: "worker", status: "running", currentToolStartedAt: 10 }],
+		}], theme, 120);
+		const secondStep = buildWidgetLines([{
+			asyncId: "run-step-progress",
+			asyncDir: "/tmp/run-step",
+			status: "running",
+			agents: ["worker"],
+			stepsTotal: 1,
+			updatedAt: 20,
+			steps: [{ agent: "worker", status: "running", currentToolStartedAt: 11 }],
+		}], theme, 120);
+		assert.notEqual(
+			firstRunningGlyph(firstStep.find((line) => line.includes("Step 1/1")) ?? ""),
+			firstRunningGlyph(secondStep.find((line) => line.includes("Step 1/1")) ?? ""),
+			"step glyph should advance from changed step progress",
+		);
+	});
+
+	it("keeps running widget output stable when progress seed is unchanged", async () => {
+		const job = {
+			asyncId: "run-stable",
+			asyncDir: "/tmp/run",
+			status: "running",
+			agents: ["worker"],
+			startedAt: 1_000,
+			updatedAt: 3_000,
+			currentTool: "read",
+			currentToolStartedAt: 2_000,
+			lastActivityAt: 2_500,
+		};
+		const first = buildWidgetLines([job], theme, 120);
+		await new Promise((resolve) => setTimeout(resolve, 120));
+		const second = buildWidgetLines([job], theme, 120);
+
+		assert.deepEqual(second, first);
+		assert.equal(firstGrapheme(first[1] ?? ""), firstGrapheme(second[1] ?? ""));
+	});
+
 	it("does not animate queued-only widgets", async () => {
 		const ui = createUiContext();
-		try {
-			renderWidget(ui.ctx as never, [{ asyncId: "queued-only", asyncDir: "/tmp/queued", status: "queued", agents: ["planner"] }]);
-			const initialWidgetCount = ui.widgets.length;
-			await new Promise((resolve) => setTimeout(resolve, 190));
-			assert.equal(ui.widgets.length, initialWidgetCount, "static queued widget should not refresh at animation cadence");
-			assert.equal(ui.renderRequests, 0);
-		} finally {
-			stopWidgetAnimation();
-		}
+		renderWidget(ui.ctx as never, [{ asyncId: "queued-only", asyncDir: "/tmp/queued", status: "queued", agents: ["planner"] }]);
+		const initialWidgetCount = ui.widgets.length;
+		await new Promise((resolve) => setTimeout(resolve, 190));
+		assert.equal(ui.widgets.length, initialWidgetCount, "static queued widget should not refresh at animation cadence");
+		assert.equal(ui.renderRequests, 0);
 	});
 
-	it("invalidates running result rows and stops after completion", async () => {
-		let invalidations = 0;
+	it("clears legacy result row animation timers", async () => {
+		let ticks = 0;
 		const context = {
-			state: {},
-			invalidate: () => {
-				invalidations += 1;
-			},
+			state: { subagentResultAnimationTimer: setInterval(() => { ticks += 1; }, 10) },
 		};
 		try {
-			syncResultAnimation({
-				content: [{ type: "text", text: "running" }],
-				details: {
-					mode: "parallel",
-					results: [{ agent: "scout", task: "scan", exitCode: 0, progress: { status: "running" } }],
-				},
-			}, context);
-			await new Promise((resolve) => setTimeout(resolve, 190));
-			assert.ok(invalidations > 0, "running result should request row redraws");
-			assert.ok(context.state.subagentResultAnimationTimer, "running result should store its timer handle");
-			stopResultAnimations();
-			assert.equal(context.state.subagentResultAnimationTimer, undefined, "global cleanup should clear row timer state");
-
-			syncResultAnimation({
-				content: [{ type: "text", text: "running again" }],
-				details: {
-					mode: "parallel",
-					results: [{ agent: "scout", task: "scan", exitCode: 0, progress: { status: "running" } }],
-				},
-			}, context);
-			assert.ok(context.state.subagentResultAnimationTimer, "running result should restart after global cleanup");
-
-			syncResultAnimation({
-				content: [{ type: "text", text: "done" }],
-				details: {
-					mode: "parallel",
-					results: [{ agent: "scout", task: "scan", exitCode: 0, progress: { status: "completed" } }],
-				},
-			}, context);
-			const afterComplete = invalidations;
-			await new Promise((resolve) => setTimeout(resolve, 190));
-			assert.equal(invalidations, afterComplete, "completed result should stop row redraws");
+			clearLegacyResultAnimationTimer(context);
+			await new Promise((resolve) => setTimeout(resolve, 50));
 			assert.equal(context.state.subagentResultAnimationTimer, undefined);
+			assert.equal(ticks, 0, "legacy timer should be cleared before it can tick");
 		} finally {
-			stopResultAnimations();
+			if (context.state.subagentResultAnimationTimer) clearInterval(context.state.subagentResultAnimationTimer);
 		}
 	});
 
-	it("stops result animation when invalidate throws stale-context errors", async () => {
-		let invalidations = 0;
-		const context = {
-			state: {},
-			invalidate: () => {
-				invalidations += 1;
-				throw staleExtensionContextError();
-			},
-		};
-		try {
-			await expectNoUncaught(async () => {
-				syncResultAnimation({
-					content: [{ type: "text", text: "running" }],
-					details: {
-						mode: "parallel",
-						results: [{ agent: "scout", task: "scan", exitCode: 0, progress: { status: "running" } }],
-					},
-				}, context);
-				await new Promise((resolve) => setTimeout(resolve, 190));
-			});
-			assert.equal(context.state.subagentResultAnimationTimer, undefined, "stale invalidate should clear timer state");
-			const afterStop = invalidations;
-			await new Promise((resolve) => setTimeout(resolve, 190));
-			assert.equal(invalidations, afterStop, "stale invalidate should stop future timer ticks");
-		} finally {
-			stopResultAnimations();
-		}
-	});
-
-	it("animates while active and stops after the widget is cleared", async () => {
+	it("does not refresh running widgets at animation cadence", async () => {
 		const ui = createUiContext();
-		try {
-			renderWidget(ui.ctx as never, [{ asyncId: "run-anim", asyncDir: "/tmp/run", status: "running", agents: ["scout"] }]);
-			const initialWidgetCount = ui.widgets.length;
-			await new Promise((resolve) => setTimeout(resolve, 190));
-			assert.ok(ui.widgets.length > initialWidgetCount, "animation should refresh widget lines");
-			assert.ok(ui.renderRequests > 0, "animation should request UI renders");
+		renderWidget(ui.ctx as never, [{ asyncId: "run-static", asyncDir: "/tmp/run", status: "running", agents: ["scout"] }]);
+		const initialWidgetCount = ui.widgets.length;
+		await new Promise((resolve) => setTimeout(resolve, 190));
+		assert.equal(ui.widgets.length, initialWidgetCount, "running widget should wait for status updates instead of animation ticks");
+		assert.equal(ui.renderRequests, 0);
 
-			renderWidget(ui.ctx as never, []);
-			const afterClearCount = ui.widgets.length;
-			await new Promise((resolve) => setTimeout(resolve, 190));
-			assert.equal(ui.widgets.length, afterClearCount, "cleared widget should stop animating");
-			assert.equal(ui.widgets.at(-1), undefined);
-		} finally {
-			stopWidgetAnimation();
-		}
-	});
-
-	it("stops widget animation when stale-context errors are thrown during refresh", async () => {
-		const widgets: unknown[] = [];
-		let hasUiReads = 0;
-		let setWidgetCalls = 0;
-		let renderRequests = 0;
-		const ctx = {
-			get hasUI() {
-				hasUiReads += 1;
-				if (hasUiReads > 1) throw staleExtensionContextError();
-				return true;
-			},
-			ui: {
-				theme,
-				setWidget: (_key: string, value: unknown) => {
-					setWidgetCalls += 1;
-					widgets.push(value);
-				},
-				requestRender: () => {
-					renderRequests += 1;
-				},
-			},
-		};
-		try {
-			await expectNoUncaught(async () => {
-				renderWidget(ctx as never, [{ asyncId: "run-anim", asyncDir: "/tmp/run", status: "running", agents: ["scout"] }]);
-				await new Promise((resolve) => setTimeout(resolve, 190));
-			});
-			assert.equal(hasUiReads, 2, "widget refresh should stop immediately after stale hasUI throw");
-			assert.equal(setWidgetCalls, 1, "stale hasUI throw should stop before refreshing widget lines");
-			const requestsAfterStop = renderRequests;
-			await new Promise((resolve) => setTimeout(resolve, 190));
-			assert.equal(renderRequests, requestsAfterStop, "stale-context throw should stop future render requests");
-		} finally {
-			stopWidgetAnimation();
-		}
+		renderWidget(ui.ctx as never, []);
+		const afterClearCount = ui.widgets.length;
+		await new Promise((resolve) => setTimeout(resolve, 190));
+		assert.equal(ui.widgets.length, afterClearCount, "cleared widget should stay quiet");
+		assert.equal(ui.widgets.at(-1), undefined);
 	});
 });
