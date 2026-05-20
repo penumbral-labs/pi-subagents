@@ -1,17 +1,12 @@
 # Changelog
 
-## [0.24.3] - 2026-05-14
-
-### Added
-- Show provider-free model and thinking labels in async subagent widgets and status views.
-- Added a packaged `/review-loop` prompt for parent-controlled worker, fresh-reviewer, and fix-worker cycles that can run as an initial async chain or as follow-up subagent runs after async worker completions, stopping when reviewers find no fixes worth doing now or the review-round cap is reached.
-
-### Fixed
-- Let `async: true` chain tool calls run in the background when `clarify` is omitted, and avoid showing the async badge for explicit foreground clarify runs.
-
 ## [Unreleased]
 
 ### Added
+
+### Fixed
+
+## [0.24.4] - 2026-05-20
 
 ### Fixed
 - Treat provider-coerced single-run `output: "false"` the same as boolean `false`, preventing literal `false` output files in foreground and async runs.
@@ -23,6 +18,15 @@
 - Declare `@earendil-works/pi-tui` as a runtime dependency so packaged installs can load the extension without relying on dev dependencies or optional peers.
 - Treat recovered intermediate child tool/provider errors as successful when a later clean final assistant response is emitted, preventing false failed subagent results.
 - Use progress-driven spinner frames in subagent result rows and async widgets, avoiding timer-driven off-screen redraw flicker in small terminals.
+
+## [0.24.3] - 2026-05-14
+
+### Added
+- Show provider-free model and thinking labels in async subagent widgets and status views.
+- Added a packaged `/review-loop` prompt for parent-controlled worker, fresh-reviewer, and fix-worker cycles that can run as an initial async chain or as follow-up subagent runs after async worker completions, stopping when reviewers find no fixes worth doing now or the review-round cap is reached.
+
+### Fixed
+- Let `async: true` chain tool calls run in the background when `clarify` is omitted, and avoid showing the async badge for explicit foreground clarify runs.
 
 ## [0.24.2] - 2026-05-10
 
