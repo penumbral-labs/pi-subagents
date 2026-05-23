@@ -477,6 +477,65 @@ describe("intercom result delivery cutover", { skip: !available ? "executor not 
 		}
 	});
 
+	it("detached foreground toolResult carries structured outcome and intercom routing details", async () => {
+		mockPi.onCall({
+			steps: [
+				{ jsonl: [events.toolStart("contact_supervisor", { reason: "need_decision", message: "Need a decision" })] },
+				{ delay: 1000, jsonl: [events.assistantMessage("after reply")] },
+			],
+		});
+		const { executor, events: bus } = makeExecutor({ agents: [makeAgent("a", { systemPrompt: "Intercom orchestration channel:" })] });
+		let detachEmitted = false;
+		const result = await executor.execute(
+			"foreground-detached-structured-details",
+			{ agent: "a", task: "ask supervisor" },
+			new AbortController().signal,
+			(update: { details?: { progress?: Array<{ currentTool?: string }> } }) => {
+				if (detachEmitted) return;
+				if (!update.details?.progress?.some((entry) => entry.currentTool === "contact_supervisor")) return;
+				detachEmitted = true;
+				bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "structured-details" });
+			},
+			makeMinimalCtx(tempDir),
+		);
+
+		assert.equal(detachEmitted, true);
+		// Top-level outcome discriminator: orchestrators should be able to route on this without
+		// pattern-matching the human-readable text.
+		assert.equal(result.details?.outcome, "detached");
+		// Structured detached payload with run id and child intercom target.
+		assert.equal(result.details?.detached?.reason, "intercom coordination");
+		const runId = result.details?.runId;
+		assert.ok(runId, "expected foreground run id");
+		assert.equal(result.details?.detached?.runId, runId);
+		assert.equal(result.details?.detached?.children?.length, 1);
+		const child = result.details?.detached?.children?.[0];
+		assert.equal(child?.index, 0);
+		assert.equal(child?.agent, "a");
+		assert.match(child?.intercomTarget ?? "", /^subagent-a-[a-f0-9]+-1$/);
+		// Human-readable text now mentions the runId and the intercom target so an LLM-driven
+		// orchestrator that only sees text can also route a reply.
+		const text = result.content[0]?.text ?? "";
+		assert.match(text, /Detached for intercom coordination: a/);
+		assert.match(text, new RegExp(`runId=${runId}`));
+		assert.match(text, /do NOT re-dispatch/);
+		assert.match(text, new RegExp(child?.intercomTarget ?? "<missing>"));
+	});
+
+	it("completed foreground toolResult sets outcome=completed (regression: discriminator on success)", async () => {
+		mockPi.onCall({ output: "Done" });
+		const { executor } = makeExecutor({ bridgeMode: "off" });
+		const result = await executor.execute(
+			"foreground-completed-outcome",
+			{ agent: "worker", task: "do a thing" },
+			new AbortController().signal,
+			undefined,
+			makeMinimalCtx(tempDir),
+		);
+		assert.equal(result.details?.outcome, "completed");
+		assert.equal(result.details?.detached, undefined);
+	});
+
 	it("resume action rejects detached foreground children that may still be live", async () => {
 		mockPi.onCall({
 			steps: [

@@ -1797,6 +1797,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		});
 		rememberForegroundRun(deps.state, { runId, mode: "parallel", cwd: effectiveCwd, results: details.results });
 		if (interrupted) {
+			details.outcome = "interrupted";
 			return {
 				content: [{ type: "text", text: `Parallel run paused after interrupt (${interrupted.agent}). Waiting for explicit next action.` }],
 				details,
@@ -1805,8 +1806,26 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 		const detachedIndex = results.findIndex((result) => result.detached);
 		const detached = detachedIndex >= 0 ? results[detachedIndex] : undefined;
 		if (detached) {
+			const detachedChildren = data.intercomBridge.active
+				? results
+					.map((result, index) => result.detached
+						? { index, agent: result.agent, intercomTarget: resolveSubagentIntercomTarget(runId, result.agent, index) }
+						: undefined)
+					.filter((entry): entry is { index: number; agent: string; intercomTarget: string } => entry !== undefined)
+				: [];
+			details.outcome = "detached";
+			details.detached = {
+				reason: "intercom coordination",
+				runId,
+				children: detachedChildren,
+			};
+			const targetHint = detachedChildren.length === 1
+				? ` Reply to the supervisor request via intercom target \`${detachedChildren[0]!.intercomTarget}\`.`
+				: detachedChildren.length > 1
+					? ` Reply to the supervisor request(s) via intercom targets: ${detachedChildren.map((c) => `\`${c.intercomTarget}\``).join(", ")}.`
+					: "";
 			return {
-				content: [{ type: "text", text: `Parallel run detached for intercom coordination (${detached.agent}). Reply to the supervisor request first. After the child exits, start a fresh follow-up if needed.` }],
+				content: [{ type: "text", text: `Parallel run detached for intercom coordination (${detached.agent}, runId=${runId}). The child is still alive — do NOT re-dispatch.${targetHint} After the child exits, start a fresh follow-up if needed.` }],
 				details,
 			};
 		}
@@ -1845,6 +1864,7 @@ async function runParallelPath(data: ExecutionContextData, deps: ExecutorDeps): 
 			? `${summary}\n\n${aggregatedOutput}\n\n${worktreeSuffix}`
 			: `${summary}\n\n${aggregatedOutput}`;
 
+		details.outcome = ok === results.length ? "completed" : "failed";
 		return {
 			content: [{ type: "text", text: fullContent }],
 			details,
@@ -2112,25 +2132,43 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 	}
 
 	if (r.detached) {
+		const childIntercomTargetName = data.intercomBridge.active
+			? resolveSubagentIntercomTarget(runId, params.agent!, 0)
+			: undefined;
+		details.outcome = "detached";
+		details.detached = {
+			reason: "intercom coordination",
+			runId,
+			children: childIntercomTargetName
+				? [{ index: 0, agent: params.agent!, intercomTarget: childIntercomTargetName }]
+				: [],
+		};
+		const targetHint = childIntercomTargetName
+			? ` Reply to the supervisor request via intercom target \`${childIntercomTargetName}\`.`
+			: "";
 		return {
-			content: [{ type: "text", text: `Detached for intercom coordination: ${params.agent}. Reply to the supervisor request first. After the child exits, start a fresh follow-up if needed.` }],
+			content: [{ type: "text", text: `Detached for intercom coordination: ${params.agent} (runId=${runId}). The child is still alive — do NOT re-dispatch.${targetHint} After the child exits, start a fresh follow-up if needed.` }],
 			details,
 		};
 	}
 
 	if (r.interrupted) {
+		details.outcome = "interrupted";
 		return {
 			content: [{ type: "text", text: `Run paused after interrupt (${params.agent}). Waiting for explicit next action.` }],
 			details,
 		};
 	}
 
-	if (r.exitCode !== 0)
+	if (r.exitCode !== 0) {
+		details.outcome = "failed";
 		return {
 			content: [{ type: "text", text: r.error || "Failed" }],
 			details,
 			isError: true,
 		};
+	}
+	details.outcome = "completed";
 	return {
 		content: [{ type: "text", text: finalizedOutput.displayOutput || "(no output)" }],
 		details,

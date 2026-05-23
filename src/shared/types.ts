@@ -223,10 +223,45 @@ export interface SingleResult {
 	outputSaveError?: string;
 }
 
+/**
+ * Top-level run outcome for foreground subagent results.
+ *
+ * `"detached"` means the child is still alive and waiting on the supervisor;
+ * the toolResult returned early so the orchestrator can reply via intercom.
+ * Do not re-dispatch a detached run — see the `Detached*` fields on `Details`
+ * for the run id and child intercom target needed to route a reply or to
+ * inspect status while the child runs.
+ */
+export type ForegroundOutcome = "completed" | "detached" | "interrupted" | "failed";
+
+export interface DetachedDetails {
+	/** Reason the child detached. Currently only "intercom coordination". */
+	reason: "intercom coordination";
+	/** Run id of the still-alive foreground run; pass to subagent({action:"status"}) and intercom routing. */
+	runId: string;
+	/**
+	 * Per-child intercom session names that supervisors can reply to. For mode="single" this
+	 * is one entry; for mode="parallel" it is one per detached child.
+	 */
+	children: Array<{
+		index: number;
+		agent: string;
+		intercomTarget: string;
+	}>;
+}
+
 export interface Details {
 	mode: SubagentRunMode | "management";
 	runId?: string;
 	context?: "fresh" | "fork";
+	/**
+	 * Top-level outcome discriminator. Set on foreground completion paths so an
+	 * orchestrator extension can route on `details.outcome === "detached"` without
+	 * pattern-matching the human-readable `content[0].text`.
+	 */
+	outcome?: ForegroundOutcome;
+	/** Populated alongside `outcome === "detached"` with structured supervisor-routing info. */
+	detached?: DetachedDetails;
 	results: SingleResult[];
 	controlEvents?: ControlEvent[];
 	asyncId?: string;
