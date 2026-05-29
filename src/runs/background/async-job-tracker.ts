@@ -90,6 +90,9 @@ export function createAsyncJobTracker(pi: Pick<ExtensionAPI, "events">, state: S
 				const payload = {
 					event: record.event,
 					source: "async" as const,
+					runId: record.event.runId,
+					agent: record.event.agent,
+					...(record.event.index !== undefined ? { index: record.event.index } : {}),
 					asyncDir: job.asyncDir,
 					childIntercomTarget: record.childIntercomTarget,
 					noticeText: record.noticeText ?? formatControlNoticeMessage(record.event, record.childIntercomTarget),

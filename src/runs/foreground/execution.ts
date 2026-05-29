@@ -16,13 +16,18 @@ import {
 	type AgentProgress,
 	type ArtifactPaths,
 	type ControlEvent,
+	type IntercomDetachRefusalReason,
+	type IntercomDetachRequest,
 	type ModelAttempt,
 	type RunSyncOptions,
 	type SingleResult,
+	type SubagentForegroundLifecycle,
 	type Usage,
 	DEFAULT_MAX_OUTPUT,
 	INTERCOM_DETACH_REQUEST_EVENT,
 	INTERCOM_DETACH_RESPONSE_EVENT,
+	SUBAGENT_FOREGROUND_ENDED_EVENT,
+	SUBAGENT_FOREGROUND_STARTED_EVENT,
 	truncateOutput,
 	getSubagentDepthEnv,
 } from "../../shared/types.ts";
@@ -63,6 +68,7 @@ import {
 	shouldEscalateMutatingFailures,
 	summarizeRecentMutatingFailures,
 } from "../shared/long-running-guard.ts";
+import { resolveSubagentIntercomTarget } from "../../intercom/intercom-bridge.ts";
 
 const artifactOutputByResult = new WeakMap<SingleResult, string>();
 
@@ -224,14 +230,23 @@ async function runSingleAttempt(
 		let removeAbortListener: (() => void) | undefined;
 		let removeInterruptListener: (() => void) | undefined;
 		let activityTimer: NodeJS.Timeout | undefined;
+		const runId = options.runId ?? "foreground";
+		const intercomSession = options.intercomSessionName ?? resolveSubagentIntercomTarget(runId, agent.name, options.index);
+		const foregroundLifecycle: SubagentForegroundLifecycle = {
+			runId,
+			agent: agent.name,
+			...(options.index !== undefined ? { index: options.index } : {}),
+			intercomSession,
+			allowIntercomDetach: options.allowIntercomDetach === true,
+		};
 
 		const detachForIntercom = () => {
 			detached = true;
-			processClosed = true;
 			result.detached = true;
 			result.detachedReason = "intercom coordination";
 			progress.status = "detached";
 			progress.durationMs = Date.now() - startTime;
+			options.intercomEvents?.emit(SUBAGENT_FOREGROUND_ENDED_EVENT, foregroundLifecycle);
 			result.progressSummary = {
 				toolCount: progress.toolCount,
 				tokens: progress.tokens,
@@ -278,14 +293,45 @@ async function runSingleAttempt(
 			finalDrainTimer.unref?.();
 		};
 
+		const emitIntercomDetachRefusal = (requestId: string, reason: IntercomDetachRefusalReason) => {
+			options.intercomEvents?.emit(INTERCOM_DETACH_RESPONSE_EVENT, { requestId, accepted: false, reason });
+		};
+		const targetMatches = (payload: IntercomDetachRequest): boolean => {
+			if (payload.runId !== undefined && payload.runId !== runId) return false;
+			if (payload.agent !== undefined && payload.agent !== agent.name) return false;
+			if (payload.index !== undefined && payload.index !== options.index) return false;
+			if (payload.intercomSession !== undefined && payload.intercomSession !== intercomSession) return false;
+			return true;
+		};
 		const unsubscribeIntercomDetach = options.intercomEvents?.on?.(INTERCOM_DETACH_REQUEST_EVENT, (payload) => {
-			if (!options.allowIntercomDetach || detached || processClosed || !intercomStarted) return;
 			if (!payload || typeof payload !== "object") return;
 			const requestId = (payload as { requestId?: unknown }).requestId;
 			if (typeof requestId !== "string" || requestId.length === 0) return;
+			const request = payload as IntercomDetachRequest;
+			if (!targetMatches(request)) {
+				emitIntercomDetachRefusal(requestId, "target_mismatch");
+				return;
+			}
+			if (!options.allowIntercomDetach) {
+				emitIntercomDetachRefusal(requestId, "not_allowed");
+				return;
+			}
+			if (processClosed) {
+				emitIntercomDetachRefusal(requestId, "already_closed");
+				return;
+			}
+			if (detached) {
+				emitIntercomDetachRefusal(requestId, "already_detached");
+				return;
+			}
+			if (!intercomStarted) {
+				emitIntercomDetachRefusal(requestId, "not_started");
+				return;
+			}
 			options.intercomEvents?.emit(INTERCOM_DETACH_RESPONSE_EVENT, { requestId, accepted: true });
 			detachForIntercom();
 		});
+		options.intercomEvents?.emit(SUBAGENT_FOREGROUND_STARTED_EVENT, foregroundLifecycle);
 
 		const finish = (code: number) => {
 			if (settled) return;
@@ -296,7 +342,7 @@ async function runSingleAttempt(
 				clearInterval(activityTimer);
 				activityTimer = undefined;
 			}
-			unsubscribeIntercomDetach?.();
+			if (!detached) unsubscribeIntercomDetach?.();
 			removeAbortListener?.();
 			removeInterruptListener?.();
 			resolve(code);
@@ -387,7 +433,7 @@ async function runSingleAttempt(
 
 
 		const emitUpdateSnapshot = (text: string) => {
-			if (!options.onUpdate || processClosed) return;
+			if (!options.onUpdate || processClosed || detached) return;
 			const progressSnapshot = snapshotProgress(progress);
 			const resultSnapshot = snapshotResult(result, progressSnapshot);
 			const controlEvents = drainPendingControlEvents();
@@ -403,7 +449,7 @@ async function runSingleAttempt(
 		};
 
 		const fireUpdate = () => {
-			if (!options.onUpdate || processClosed) return;
+			if (!options.onUpdate || processClosed || detached) return;
 			progress.durationMs = Date.now() - startTime;
 			emitUpdateSnapshot(getFinalOutput(result.messages) || "(running...)");
 		};
@@ -555,10 +601,12 @@ async function runSingleAttempt(
 			});
 			cleanupTempDir(tempDir);
 			if (detached) {
+				unsubscribeIntercomDetach?.();
 				finish(-2);
 				return;
 			}
 			processClosed = true;
+			options.intercomEvents?.emit(SUBAGENT_FOREGROUND_ENDED_EVENT, foregroundLifecycle);
 			if (buf.trim()) processLine(buf);
 			if (!result.error && assistantError) result.error = assistantError;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !result.error;
@@ -575,6 +623,7 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			cleanupTempDir(tempDir);
+			unsubscribeIntercomDetach?.();
 			if (!result.error) {
 				result.error = error instanceof Error ? error.message : String(error);
 			}
