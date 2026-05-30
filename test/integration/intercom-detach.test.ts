@@ -78,6 +78,9 @@ async function waitForResponse(bus: ReturnType<typeof createRecordingEventBus>, 
 		if (responses(bus, requestId).length > 0) return;
 		await new Promise((resolve) => setTimeout(resolve, 10));
 	}
+	// Fail loudly rather than letting a missing response slip into a later
+	// assertion (mirrors waitForForegroundStarted).
+	assert.fail(`timed out waiting for detach response for ${requestId}`);
 }
 
 async function startRun(input: {
@@ -96,7 +99,7 @@ async function startRun(input: {
 	input.mockPi.onCall({
 		steps: input.steps ?? [
 			{ jsonl: [events.toolStart("intercom", { action: "send", to: "orchestrator" })] },
-			{ delay: 1000, jsonl: [events.assistantMessage("done")] },
+			{ delay: input.delay ?? 1000, jsonl: [events.assistantMessage("done")] },
 		],
 	});
 	const agentName = input.agent ?? "worker";
@@ -109,6 +112,10 @@ async function startRun(input: {
 		...(input.onUpdate ? { onUpdate: input.onUpdate } : {}),
 	});
 	await waitForForegroundStarted(input.bus, input.runId);
+	// Give the mock child a beat to emit its first intercom tool event so
+	// intercomStarted flips true before tests request a detach; otherwise an
+	// accept-path request would race the child and hit `not_started`.
+	// TODO: replace this magic delay with an explicit intercom-started ack.
 	await new Promise((resolve) => setTimeout(resolve, 25));
 	return promise;
 }
@@ -153,10 +160,21 @@ describe("intercom detach contract", { skip: !available ? "execution module not 
 
 	it("emits not_started refusal before the child starts intercom", async () => {
 		const bus = createRecordingEventBus();
-		const run = await startRun({ mockPi, tempDir, bus, runId: "not-started", allowIntercomDetach: false, onUpdate: () => bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "not-started-request", runId: "not-started" }) });
+		// Emit the detach request synchronously the instant the child spawns — before
+		// any stdout is parsed — so intercomStarted is still false and the listener must
+		// answer "not_started". (The onUpdate path cannot reach this branch: onUpdate
+		// fires only after the child's first intercom tool event is parsed, which is
+		// also what flips intercomStarted true.)
+		let emitted = false;
+		bus.on(SUBAGENT_FOREGROUND_STARTED_EVENT, (payload) => {
+			if (emitted || !payload || typeof payload !== "object" || (payload as { runId?: unknown }).runId !== "not-started") return;
+			emitted = true;
+			bus.emit(INTERCOM_DETACH_REQUEST_EVENT, { requestId: "not-started-request", runId: "not-started" });
+		});
+		const run = await startRun({ mockPi, tempDir, bus, runId: "not-started", allowIntercomDetach: true });
 		await waitForResponse(bus, "not-started-request");
 
-		assert.equal(responses(bus, "not-started-request").some((payload) => payload.reason === "not_allowed" || payload.reason === "not_started"), true);
+		assert.equal(responses(bus, "not-started-request").some((payload) => payload.reason === "not_started"), true);
 		await run;
 	});
 
@@ -234,8 +252,11 @@ describe("intercom detach contract", { skip: !available ? "execution module not 
 		const resultB = await runB;
 		assert.equal(resultA.detached, true);
 		assert.equal(resultB.detached, undefined);
-		assert.equal(responses(bus, "same-agent-request").filter((payload) => payload.accepted === true).length >= 1, true);
-		assert.equal(responses(bus, "same-agent-request").filter((payload) => payload.reason === "target_mismatch" || payload.accepted === true).length >= 1, true);
+		// The addressed child accepts; the "only the right child detached" guarantee is
+		// asserted via resultA/resultB.detached above. We do not assert a target_mismatch
+		// response here: whether the non-target child is still subscribed when the request
+		// arrives is timing-dependent (its short-lived mock process may have already closed).
+		assert.equal(responses(bus, "same-agent-request").some((payload) => payload.accepted === true), true);
 	});
 
 	it("targets a child by intercomSession only", async () => {
@@ -263,8 +284,9 @@ describe("intercom detach contract", { skip: !available ? "execution module not 
 		const resultB = await runB;
 		assert.equal(resultA.detached, undefined);
 		assert.equal(resultB.detached, true);
-		assert.equal(responses(bus, "session-only-request").filter((payload) => payload.accepted === true).length >= 1, true);
-		assert.equal(responses(bus, "session-only-request").filter((payload) => payload.reason === "target_mismatch" || payload.accepted === true).length >= 1, true);
+		// See note in the same-agent test: target_mismatch is timing-dependent, so we assert
+		// the deterministic outcome (right child accepted/detached) rather than the refusal.
+		assert.equal(responses(bus, "session-only-request").some((payload) => payload.accepted === true), true);
 	});
 
 	it("matches explicit intercomSessionName when provided", async () => {
