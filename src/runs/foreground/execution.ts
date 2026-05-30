@@ -239,6 +239,12 @@ async function runSingleAttempt(
 			intercomSession,
 			allowIntercomDetach: options.allowIntercomDetach === true,
 		};
+		let foregroundEndedEmitted = false;
+		const emitForegroundEnded = () => {
+			if (foregroundEndedEmitted) return;
+			foregroundEndedEmitted = true;
+			options.intercomEvents?.emit(SUBAGENT_FOREGROUND_ENDED_EVENT, foregroundLifecycle);
+		};
 
 		const detachForIntercom = () => {
 			detached = true;
@@ -246,7 +252,7 @@ async function runSingleAttempt(
 			result.detachedReason = "intercom coordination";
 			progress.status = "detached";
 			progress.durationMs = Date.now() - startTime;
-			options.intercomEvents?.emit(SUBAGENT_FOREGROUND_ENDED_EVENT, foregroundLifecycle);
+			emitForegroundEnded();
 			result.progressSummary = {
 				toolCount: progress.toolCount,
 				tokens: progress.tokens,
@@ -606,7 +612,7 @@ async function runSingleAttempt(
 				return;
 			}
 			processClosed = true;
-			options.intercomEvents?.emit(SUBAGENT_FOREGROUND_ENDED_EVENT, foregroundLifecycle);
+			emitForegroundEnded();
 			if (buf.trim()) processLine(buf);
 			if (!result.error && assistantError) result.error = assistantError;
 			const forcedDrainAfterFinalSuccess = forcedTerminationSignal && cleanTerminalAssistantStopReceived && !result.error;
@@ -623,6 +629,9 @@ async function runSingleAttempt(
 				// JSONL artifact flush is best effort.
 			});
 			cleanupTempDir(tempDir);
+			// Spawn never produced a process, but foreground-started already fired — emit
+			// ended so lifecycle consumers don't retain a permanently-running child.
+			emitForegroundEnded();
 			unsubscribeIntercomDetach?.();
 			if (!result.error) {
 				result.error = error instanceof Error ? error.message : String(error);

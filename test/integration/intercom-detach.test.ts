@@ -355,4 +355,21 @@ describe("intercom detach contract", { skip: !available ? "execution module not 
 		});
 		assert.deepEqual(ended, started);
 	});
+
+	it("emits foreground-ended when the child fails to spawn", async () => {
+		// A non-existent cwd makes spawn emit "error" after the ChildProcess is created
+		// (so foreground-started already fired). Every started child must also emit ended,
+		// or lifecycle consumers (e.g. pi-intercom) leak a permanently-running child.
+		const bus = createRecordingEventBus();
+		const result = await runSync!(`${tempDir}/missing-cwd`, [makeAgent("worker")], "worker", "Task", {
+			runId: "spawn-error",
+			allowIntercomDetach: true,
+			intercomEvents: bus,
+		});
+		const started = bus.emitted.filter((entry) => entry.channel === SUBAGENT_FOREGROUND_STARTED_EVENT && (entry.payload as { runId?: unknown })?.runId === "spawn-error");
+		const ended = bus.emitted.filter((entry) => entry.channel === SUBAGENT_FOREGROUND_ENDED_EVENT && (entry.payload as { runId?: unknown })?.runId === "spawn-error");
+		assert.equal(started.length >= 1, true);
+		assert.equal(ended.length, started.length);
+		assert.notEqual(result.exitCode, 0);
+	});
 });
