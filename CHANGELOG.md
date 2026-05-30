@@ -2,6 +2,12 @@
 
 ## [Unreleased]
 
+### Added
+- Documented and typed the pi-intercom detach contract, including foreground lifecycle events for child start/end tracking and targeted detach responses.
+
+### Changed
+- Foreground intercom detach listeners now always respond to well-formed requests with accepted or a typed refusal reason, and detach requests can target children by run id, agent, index, or intercom session.
+
 ## [0.25.0] - 2026-05-21
 
 ### Added

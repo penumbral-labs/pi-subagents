@@ -567,12 +567,36 @@ export interface IntercomEventBus {
 	emit(channel: string, data: unknown): void;
 }
 
+export interface IntercomDetachRequest {
+	requestId: string;
+	runId?: string;
+	agent?: string;
+	index?: number;
+	intercomSession?: string;
+}
+
+export type IntercomDetachRefusalReason = "not_allowed" | "not_started" | "already_detached" | "already_closed" | "target_mismatch";
+
+export type IntercomDetachResponse =
+	| { requestId: string; accepted: true }
+	| { requestId: string; accepted: false; reason: IntercomDetachRefusalReason };
+
 export const INTERCOM_DETACH_REQUEST_EVENT = "pi-intercom:detach-request";
 export const INTERCOM_DETACH_RESPONSE_EVENT = "pi-intercom:detach-response";
+export const SUBAGENT_FOREGROUND_STARTED_EVENT = "subagent:foreground-started";
+export const SUBAGENT_FOREGROUND_ENDED_EVENT = "subagent:foreground-ended";
 export const SUBAGENT_ASYNC_STARTED_EVENT = "subagent:async-started";
 export const SUBAGENT_ASYNC_COMPLETE_EVENT = "subagent:async-complete";
 export const SUBAGENT_CONTROL_EVENT = "subagent:control-event";
 export const SUBAGENT_CONTROL_INTERCOM_EVENT = "subagent:control-intercom";
+
+export interface SubagentForegroundLifecycle {
+	runId: string;
+	agent: string;
+	index?: number;
+	intercomSession: string;
+	allowIntercomDetach: boolean;
+}
 export const SUBAGENT_RESULT_INTERCOM_EVENT = "subagent:result-intercom";
 export const SUBAGENT_RESULT_INTERCOM_DELIVERY_EVENT = "subagent:result-intercom-delivery";
 

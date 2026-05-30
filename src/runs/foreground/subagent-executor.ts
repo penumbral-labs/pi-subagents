@@ -383,6 +383,9 @@ function emitControlNotification(input: {
 	const payload = {
 		event: input.event,
 		source: "foreground" as const,
+		runId: input.event.runId,
+		agent: input.event.agent,
+		...(input.event.index !== undefined ? { index: input.event.index } : {}),
 		childIntercomTarget,
 		noticeText: formatControlNoticeMessage(input.event, childIntercomTarget),
 	};
@@ -1465,11 +1468,12 @@ async function runForegroundParallelTasks(input: ForegroundParallelRunInput): Pr
 			};
 		}
 		const agentConfig = input.agents.find((agent) => agent.name === task.agent);
+		const allowIntercomDetach = agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true;
 		return runSync(input.ctx.cwd, input.agents, task.agent, taskText, {
 			cwd: taskCwd,
 			signal: input.signal,
 			interruptSignal: interruptController.signal,
-			allowIntercomDetach: agentConfig?.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
+			allowIntercomDetach,
 			intercomEvents: input.intercomEvents,
 			runId: input.runId,
 			index,
@@ -2046,11 +2050,12 @@ async function runSinglePath(data: ExecutionContextData, deps: ExecutorDeps): Pr
 		}
 		: undefined;
 
+	const allowIntercomDetach = agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true;
 	const r = await runSync(ctx.cwd, agents, params.agent!, task, {
 		cwd: effectiveCwd,
 		signal,
 		interruptSignal: interruptController.signal,
-		allowIntercomDetach: agentConfig.systemPrompt?.includes(INTERCOM_BRIDGE_MARKER) === true,
+		allowIntercomDetach,
 		intercomEvents: deps.pi.events,
 		runId,
 		sessionDir: sessionDirForIndex(0),
